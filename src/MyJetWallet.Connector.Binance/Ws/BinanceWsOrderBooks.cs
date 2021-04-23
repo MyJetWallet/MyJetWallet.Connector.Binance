@@ -3,22 +3,20 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
 using System.Net.WebSockets;
-using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
-using Microsoft.VisualBasic;
 using MyJetWallet.Connector.Binance.Ws.Models;
 using MyJetWallet.Connector.Binance.WsEngine;
 
 
 namespace MyJetWallet.Connector.Binance.Ws
 {
-    public class FtxWsOrderBooks : IDisposable
+    public class BinanceWsOrderBooks : IDisposable
     {
-        private ILogger<FtxWsOrderBooks> _logger;
+        private ILogger<BinanceWsOrderBooks> _logger;
         private readonly string[] _symbols;
         private readonly bool _fasted;
         private readonly WebsocketEngine _engine;
@@ -27,14 +25,14 @@ namespace MyJetWallet.Connector.Binance.Ws
         private Dictionary<string, BinanceOrderBookCache> _cache = new();
         private readonly object _sync = new object();
 
-        public FtxWsOrderBooks(ILogger<FtxWsOrderBooks> logger, string[] symbols, bool fasted)
+        public BinanceWsOrderBooks(ILogger<BinanceWsOrderBooks> logger, string[] symbols, bool fasted)
         {
             var url = "wss://stream.binance.com:9443/ws";
 
             _logger = logger;
             _symbols = symbols.Select(e => e.ToLower()).ToArray();
             _fasted = fasted;
-            _engine = new WebsocketEngine(nameof(FtxWsOrderBooks), url, 5000, 10000, logger);
+            _engine = new WebsocketEngine(nameof(BinanceWsOrderBooks), url, 5000, 10000, logger);
             _engine.SendPing = SendPing;
             _engine.OnReceive = Receive;
             _engine.OnConnect = Connect;
