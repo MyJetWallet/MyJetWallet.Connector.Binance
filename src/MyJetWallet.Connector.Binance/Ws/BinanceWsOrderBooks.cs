@@ -16,7 +16,7 @@ namespace MyJetWallet.Connector.Binance.Ws
 {
     public class BinanceWsOrderBooks : IDisposable
     {
-        private ILogger<BinanceWsOrderBooks> _logger;
+        private ILogger _logger;
         private readonly string[] _symbols;
         private readonly bool _fasted;
         private readonly WebsocketEngine _engine;
@@ -25,7 +25,7 @@ namespace MyJetWallet.Connector.Binance.Ws
         private Dictionary<string, BinanceOrderBookCache> _cache = new();
         private readonly object _sync = new object();
 
-        public BinanceWsOrderBooks(ILogger<BinanceWsOrderBooks> logger, string[] symbols, bool fasted)
+        public BinanceWsOrderBooks(ILogger logger, string[] symbols, bool fasted)
         {
             var url = "wss://stream.binance.com:9443/ws";
 
