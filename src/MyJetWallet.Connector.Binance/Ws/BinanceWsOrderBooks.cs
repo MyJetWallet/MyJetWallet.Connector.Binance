@@ -32,7 +32,7 @@ namespace MyJetWallet.Connector.Binance.Ws
             _logger = logger;
             _symbols = symbols.Select(e => e.ToLower()).ToArray();
             _fasted = fasted;
-            _engine = new WebsocketEngine(nameof(BinanceWsOrderBooks), url, 5000, 10000, logger);
+            _engine = new WebsocketEngine(nameof(BinanceWsOrderBooks), url, 5000, 20000, logger);
             _engine.SendPing = SendPing;
             _engine.OnReceive = Receive;
             _engine.OnConnect = Connect;
@@ -53,19 +53,37 @@ namespace MyJetWallet.Connector.Binance.Ws
 
             await socket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)), WebSocketMessageType.Text, true, CancellationToken.None);
 
+#pragma warning disable 4014
+            SubscribeTosymbols(socket, _symbols);
+#pragma warning restore 4014
+
+        }
+
+        private async Task SubscribeTosymbols(ClientWebSocket socket, string[] symbols)
+        {
+            await Task.Delay(10).ConfigureAwait(false);
+
+            var id = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             foreach (var symbol in _symbols)
             {
-                await Subscribe(socket, symbol);
+                if (socket.State != WebSocketState.Open)
+                    return;
+
+                Console.WriteLine($"Subscribe to symbol {symbol}");
+
+                await Subscribe(socket, symbol, ++id, _fasted).ConfigureAwait(false);
+                
+                await Task.Delay(2000);
             }
         }
 
-        private async Task Subscribe(ClientWebSocket socket, string symbol)
+        private static async Task Subscribe(ClientWebSocket socket, string symbol, long id, bool fasted)
         {
-            var interval = _fasted ? "@100ms" : "";
+            var interval = fasted ? "@100ms" : "";
 
             var packet = new SubscribePacket()
             {
-                id = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                id = id,
                 method = "SUBSCRIBE",
                 @params = new []{ $"{symbol}@depth{interval}" }
             };
