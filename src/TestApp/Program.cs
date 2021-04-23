@@ -19,8 +19,8 @@ namespace TestApp
 
             ILogger<Program> logger = loggerFactory.CreateLogger<Program>();
 
-            var client = new FtxWsOrderBooks(loggerFactory.CreateLogger<FtxWsOrderBooks>(), new[] {"BTCUSDT"}, true);
-            //var client = new FtxWsOrderBooks(loggerFactory.CreateLogger<FtxWsOrderBooks>(), new[] { "BTCUSDT", "xlmusdt", "XrPUsDT" }, false);
+            //var client = new FtxWsOrderBooks(loggerFactory.CreateLogger<FtxWsOrderBooks>(), new[] {"BTCUSDT"}, true);
+            var client = new FtxWsOrderBooks(loggerFactory.CreateLogger<FtxWsOrderBooks>(), new[] { "BTCUSDT", "xlmusdt", "XrPUsDT" }, true);
 
             client.BestPriceUpdateCallback = (time, symbol, bid, ask) =>
                 Console.WriteLine($"{symbol}  {time:HH:mm:ss}  {bid}  {ask}");
