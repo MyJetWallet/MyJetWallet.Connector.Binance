@@ -32,7 +32,7 @@ namespace MyJetWallet.Connector.Binance.Ws
             var url = "wss://stream.binance.com:9443/ws";
 
             _logger = logger;
-            _symbols = symbols;
+            _symbols = symbols.Select(e => e.ToLower()).ToArray();
             _fasted = fasted;
             _engine = new WebsocketEngine(nameof(FtxWsOrderBooks), url, 5000, 10000, logger);
             _engine.SendPing = SendPing;
@@ -57,13 +57,13 @@ namespace MyJetWallet.Connector.Binance.Ws
 
             foreach (var symbol in _symbols)
             {
-                await Subscribe(socket, _fasted, symbol);
+                await Subscribe(socket, symbol);
             }
         }
 
-        private static async Task Subscribe(ClientWebSocket socket, bool fasted, string symbol)
+        private async Task Subscribe(ClientWebSocket socket, string symbol)
         {
-            var interval = fasted ? "@100ms" : "";
+            var interval = _fasted ? "@100ms" : "";
 
             var packet = new SubscribePacket()
             {
@@ -99,8 +99,8 @@ namespace MyJetWallet.Connector.Binance.Ws
 
             if (book == null)
             {
-                var symbol = packet.Stream.Replace("@depth", "").Replace("@100", "");
-                book = await LoadSnapshot(symbol);
+                var symbol = packet.Stream.Replace("@depth", "").Replace("@100ms", "");
+                book = await LoadSnapshot(symbol, packet.Stream);
                 BestPriceUpdate(book);
             }
 
@@ -109,8 +109,9 @@ namespace MyJetWallet.Connector.Binance.Ws
                 return;
             }
 
-            if (packet.Data.FirstUpdateId == book.LastId + 1 ||
+            if ((packet.Data.FirstUpdateId == book.LastId + 1 ||
                 (packet.Data.FirstUpdateId <= book.LastId && book.LastId <= packet.Data.LastUpdateId))
+                && book.Asks.Count < 3000 && book.Bids.Count < 3000)
             {
                 lock (_sync)
                 {
@@ -134,7 +135,7 @@ namespace MyJetWallet.Connector.Binance.Ws
                         var price = decimal.Parse(level[0]);
                         var volume = decimal.Parse(level[1]);
 
-                        if (level[1] == "0")
+                        if (volume == 0)
                         {
                             book.Bids.Remove(price);
                         }
@@ -143,18 +144,21 @@ namespace MyJetWallet.Connector.Binance.Ws
                             book.Bids[price] = volume;
                         }
                     }
+
+                    book.LastId = packet.Data.LastUpdateId;
+                    book.Time = packet.Data.GetTime();
                 }
 
                 BestPriceUpdate(book);
             }
             else
             {
-                var symbol = packet.Stream.Replace("@depth", "").Replace("@100", "");
-                _logger.LogError($"Resubscribe {symbol}. LastId={book.LastId}. Receive: {packet.Data.FirstUpdateId}|{packet.Data.LastUpdateId}");
-                book = await LoadSnapshot(symbol);
+                var symbol = packet.Stream.Replace("@depth", "").Replace("@100ms", "");
+                _logger.LogInformation($"Resubscribe {symbol}. LastId={book.LastId}. Receive: {packet.Data.FirstUpdateId}|{packet.Data.LastUpdateId}. Count: {book.Asks.Count}|{book.Bids.Count}");
+                book = await LoadSnapshot(symbol, packet.Stream);
                 lock (_sync)
                 {
-                    _cache[book.Symbol] = book;
+                    _cache[packet.Stream] = book;
                 }
 
                 BestPriceUpdate(book);
@@ -168,19 +172,19 @@ namespace MyJetWallet.Connector.Binance.Ws
             action?.Invoke(
                 book.Time,
                 book.Symbol,
-                book.Bids[book.Bids.Keys.Max()],
-                book.Asks[book.Asks.Keys.Min()]
+                book.Bids.Keys.Max(),
+                book.Asks.Keys.Min()
             );
         }
 
-        private async Task<BinanceOrderBookCache> LoadSnapshot(string symbol)
+        private async Task<BinanceOrderBookCache> LoadSnapshot(string symbol, string stream)
         {
             BinanceOrderBookCache book;
             var snapshot = await GetSnapshot(symbol);
 
             book = new BinanceOrderBookCache()
             {
-                Symbol = symbol,
+                Symbol = symbol.ToUpper(),
                 Time = DateTime.UtcNow,
                 LastId = snapshot.LastUpdateId,
                 Asks = snapshot.asks.ToDictionary(e => decimal.Parse(e[0]), e => decimal.Parse(e[1])),
@@ -189,9 +193,11 @@ namespace MyJetWallet.Connector.Binance.Ws
 
             lock (_sync)
             {
-                _cache[book.Symbol] = book;
+                _cache[stream] = book;
             }
-            
+
+            Console.WriteLine($"Load snapshot: {symbol}. LastId: {book.LastId}. Time: {book.Time:O}");
+
             return book;
         }
 
@@ -214,6 +220,31 @@ namespace MyJetWallet.Connector.Binance.Ws
         {
             _engine.Stop();
             _engine.Dispose();
+        }
+
+        public BinanceOrderBookCache GetOrderBook(string symbol)
+        {
+            var interval = _fasted ? "@100ms" : "";
+            var key = $"{symbol.ToLower()}@depth{interval}";
+
+            lock (_sync)
+            {
+                if (!_cache.TryGetValue(key, out var book))
+                {
+                    return null;
+                }
+
+                var result = new BinanceOrderBookCache()
+                {
+                    Symbol = book.Symbol,
+                    Time = book.Time,
+                    LastId = book.LastId,
+                    Asks = book.Asks.ToDictionary(e => e.Key, e => e.Value),
+                    Bids = book.Bids.ToDictionary(e => e.Key, e => e.Value)
+                };
+
+                return result;
+            }
         }
 
         private async Task<OrderBookSnapshotDto> GetSnapshot(string symbol)
