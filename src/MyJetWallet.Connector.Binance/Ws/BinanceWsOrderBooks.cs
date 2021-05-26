@@ -10,6 +10,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using MyJetWallet.Connector.Binance.Ws.Models;
 using MyJetWallet.Connector.Binance.WsEngine;
+using Prometheus;
 
 
 namespace MyJetWallet.Connector.Binance.Ws
@@ -36,6 +37,7 @@ namespace MyJetWallet.Connector.Binance.Ws
             _engine.SendPing = SendPing;
             _engine.OnReceive = Receive;
             _engine.OnConnect = Connect;
+            _engine.OnDisconnect = OnDisconnect;
         }
 
         public Action<DateTime, string, decimal, decimal> BestPriceUpdateCallback { get; set; } = null;
@@ -56,6 +58,7 @@ namespace MyJetWallet.Connector.Binance.Ws
 #pragma warning disable 4014
             SubscribeTosymbols(socket, _symbols);
 #pragma warning restore 4014
+            BinanceOrderBookMonitoringLocator.SocketWssStatus.Inc();
 
         }
 
@@ -95,96 +98,101 @@ namespace MyJetWallet.Connector.Binance.Ws
 
         private async Task Receive(ClientWebSocket socket, string msg)
         {
-            var packet = JsonSerializer.Deserialize<OrderBookDto>(msg);
-
-            if (packet == null || string.IsNullOrEmpty(packet.Stream))
+            BinanceOrderBookMonitoringLocator.SocketWssIncomeMessages.Inc();
+            using (BinanceOrderBookMonitoringLocator.AvgWssQuoteProcessTime.NewTimer())
             {
-                Console.WriteLine(msg);
-                return;
-            }
+                var packet = JsonSerializer.Deserialize<OrderBookDto>(msg);
 
-            BinanceOrderBookCache book;
-
-            lock (_sync)
-            {
-                if (!_cache.TryGetValue(packet.Stream, out book))
+                if (packet == null || string.IsNullOrEmpty(packet.Stream))
                 {
-                    book = null;
+                    Console.WriteLine(msg);
+                    return;
                 }
-            }
 
-            if (book == null)
-            {
-                var symbol = packet.Stream.Replace("@depth", "").Replace("@100ms", "");
-                book = await LoadSnapshot(symbol, packet.Stream);
-                BestPriceUpdate(book);
-            }
+                BinanceOrderBookCache book;
 
-            if (packet.Data.LastUpdateId <= book.LastId)
-            {
-                return;
-            }
-
-            if ((packet.Data.FirstUpdateId == book.LastId + 1 ||
-                (packet.Data.FirstUpdateId <= book.LastId && book.LastId <= packet.Data.LastUpdateId))
-                && book.Asks.Count < 3000 && book.Bids.Count < 3000)
-            {
                 lock (_sync)
                 {
-                    foreach (var level in packet.Data.asks)
+                    if (!_cache.TryGetValue(packet.Stream, out book))
                     {
-                        var price = decimal.Parse(level[0]);
-                        var volume = decimal.Parse(level[1]);
-                        
-                        if (volume == 0)
-                        {
-                            book.Asks.Remove(price);
-                        }
-                        else
-                        {
-                            book.Asks[price] = volume;
-                        }
+                        book = null;
                     }
-
-                    foreach (var level in packet.Data.bids)
-                    {
-                        var price = decimal.Parse(level[0]);
-                        var volume = decimal.Parse(level[1]);
-
-                        if (volume == 0)
-                        {
-                            book.Bids.Remove(price);
-                        }
-                        else
-                        {
-                            book.Bids[price] = volume;
-                        }
-                    }
-
-                    book.LastId = packet.Data.LastUpdateId;
-                    book.Time = packet.Data.GetTime();
                 }
 
-                BestPriceUpdate(book);
-            }
-            else
-            {
-                var symbol = packet.Stream.Replace("@depth", "").Replace("@100ms", "");
-                _logger.LogInformation($"Resubscribe {symbol}. LastId={book.LastId}. Receive: {packet.Data.FirstUpdateId}|{packet.Data.LastUpdateId}. Count: {book.Asks.Count}|{book.Bids.Count}");
-                book = await LoadSnapshot(symbol, packet.Stream);
-                lock (_sync)
+                if (book == null)
                 {
-                    _cache[packet.Stream] = book;
+                    var symbol = packet.Stream.Replace("@depth", "").Replace("@100ms", "");
+                    book = await LoadSnapshot(symbol, packet.Stream);
+                    BestPriceUpdate(book);
                 }
 
-                BestPriceUpdate(book);
+                if (packet.Data.LastUpdateId <= book.LastId)
+                {
+                    return;
+                }
+                
+
+                if ((packet.Data.FirstUpdateId == book.LastId + 1 ||
+                    (packet.Data.FirstUpdateId <= book.LastId && book.LastId <= packet.Data.LastUpdateId))
+                    && book.Asks.Count < 3000 && book.Bids.Count < 3000)
+                {
+                    lock (_sync)
+                    {
+                        foreach (var level in packet.Data.asks)
+                        {
+                            var price = decimal.Parse(level[0]);
+                            var volume = decimal.Parse(level[1]);
+                            
+                            if (volume == 0)
+                            {
+                                book.Asks.Remove(price);
+                            }
+                            else
+                            {
+                                book.Asks[price] = volume;
+                            }
+                        }
+
+                        foreach (var level in packet.Data.bids)
+                        {
+                            var price = decimal.Parse(level[0]);
+                            var volume = decimal.Parse(level[1]);
+
+                            if (volume == 0)
+                            {
+                                book.Bids.Remove(price);
+                            }
+                            else
+                            {
+                                book.Bids[price] = volume;
+                            }
+                        }
+
+                        book.LastId = packet.Data.LastUpdateId;
+                        book.Time = packet.Data.GetTime();
+                    }
+
+                    BestPriceUpdate(book);
+                }
+                else
+                {
+                    var symbol = packet.Stream.Replace("@depth", "").Replace("@100ms", "");
+                    _logger.LogInformation($"Resubscribe {symbol}. LastId={book.LastId}. Receive: {packet.Data.FirstUpdateId}|{packet.Data.LastUpdateId}. Count: {book.Asks.Count}|{book.Bids.Count}");
+                    book = await LoadSnapshot(symbol, packet.Stream);
+                    lock (_sync)
+                    {
+                        _cache[packet.Stream] = book;
+                    }
+
+                    BestPriceUpdate(book);
+                }
             }
         }
 
         private void BestPriceUpdate(BinanceOrderBookCache book)
         {
             var action = BestPriceUpdateCallback;
-
+            BinanceOrderBookMonitoringLocator.BinanceQuoteIncome.WithLabels(book.Symbol).Inc();
             action?.Invoke(
                 book.Time,
                 book.Symbol,
@@ -219,6 +227,13 @@ namespace MyJetWallet.Connector.Binance.Ws
 
         private Task SendPing(ClientWebSocket arg)
         {
+            BinanceOrderBookMonitoringLocator.SocketWssPingPongStatus.Inc();
+            return Task.CompletedTask;
+        }
+        
+        private Task OnDisconnect()
+        {
+            BinanceOrderBookMonitoringLocator.SocketWssStatus.Dec();
             return Task.CompletedTask;
         }
 
