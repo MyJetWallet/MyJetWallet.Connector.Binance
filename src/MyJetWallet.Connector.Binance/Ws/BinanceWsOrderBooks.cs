@@ -12,35 +12,33 @@ using MyJetWallet.Connector.Binance.Ws.Models;
 using MyJetWallet.Connector.Binance.WsEngine;
 using Prometheus;
 
-
 namespace MyJetWallet.Connector.Binance.Ws
 {
     public class BinanceWsOrderBooks : IDisposable
     {
-        private ILogger _logger;
+        private readonly ILogger _logger;
         private readonly string[] _symbols;
         private readonly bool _fasted;
-        private readonly WebsocketEngine _engine;
-        private readonly HttpClient _httpClient = new ();
+        private readonly BinanceWebsocketEngine _engine;
+        private readonly HttpClient _httpClient = new();
 
-        private Dictionary<string, BinanceOrderBookCache> _cache = new();
+        private readonly Dictionary<string, BinanceOrderBookCache> _cache = new();
         private readonly object _sync = new object();
 
         public BinanceWsOrderBooks(ILogger logger, string[] symbols, bool fasted)
         {
-            var url = "wss://stream.binance.com:9443/ws";
+            const string url = "wss://stream.binance.com:9443/ws";
 
             _logger = logger;
             _symbols = symbols.Select(e => e.ToLower()).ToArray();
             _fasted = fasted;
-            _engine = new WebsocketEngine(nameof(BinanceWsOrderBooks), url, 5000, 20000, logger);
-            _engine.SendPing = SendPing;
-            _engine.OnReceive = Receive;
-            _engine.OnConnect = Connect;
-            _engine.OnDisconnect = OnDisconnect;
+            _engine = new BinanceWebsocketEngine(nameof(BinanceWsOrderBooks), url, 5000, 20000, logger)
+            {
+                SendPing = SendPing, OnReceive = Receive, OnConnect = Connect, OnDisconnect = OnDisconnect
+            };
         }
 
-        public Action<DateTime, string, decimal, decimal> BestPriceUpdateCallback { get; set; } = null;
+        public Action<DateTime, string, decimal, decimal> BestPriceUpdateCallback { get; set; }
 
         private async Task Connect(ClientWebSocket socket)
         {
@@ -48,26 +46,26 @@ namespace MyJetWallet.Connector.Binance.Ws
             {
                 id = 1,
                 method = "SET_PROPERTY",
-                @params = new object[] { "combined", true }
+                @params = new object[] {"combined", true}
             };
 
             var msg = JsonSerializer.Serialize(packet);
 
-            await socket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)), WebSocketMessageType.Text, true, CancellationToken.None);
+            await socket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)), WebSocketMessageType.Text, true,
+                CancellationToken.None);
 
 #pragma warning disable 4014
-            SubscribeTosymbols(socket, _symbols);
+            SubscribeToSymbols(socket, _symbols);
 #pragma warning restore 4014
             BinanceOrderBookMonitoringLocator.SocketWssStatus.Inc();
-
         }
 
-        private async Task SubscribeTosymbols(ClientWebSocket socket, string[] symbols)
+        private async Task SubscribeToSymbols(ClientWebSocket socket, IEnumerable<string> symbols)
         {
             await Task.Delay(10).ConfigureAwait(false);
 
             var id = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            foreach (var symbol in _symbols)
+            foreach (var symbol in symbols)
             {
                 if (socket.State != WebSocketState.Open)
                     return;
@@ -75,12 +73,12 @@ namespace MyJetWallet.Connector.Binance.Ws
                 Console.WriteLine($"Subscribe to symbol {symbol}");
 
                 await Subscribe(socket, symbol, ++id, _fasted).ConfigureAwait(false);
-                
+
                 await Task.Delay(2000);
             }
         }
 
-        private static async Task Subscribe(ClientWebSocket socket, string symbol, long id, bool fasted)
+        private static async Task Subscribe(WebSocket socket, string symbol, long id, bool fasted)
         {
             var interval = fasted ? "@100ms" : "";
 
@@ -88,12 +86,65 @@ namespace MyJetWallet.Connector.Binance.Ws
             {
                 id = id,
                 method = "SUBSCRIBE",
-                @params = new []{ $"{symbol}@depth{interval}" }
+                @params = new[] {$"{symbol}@depth{interval}"}
             };
 
             var msg = JsonSerializer.Serialize(packet);
 
-            await socket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)), WebSocketMessageType.Text, true, CancellationToken.None);
+            await socket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)), WebSocketMessageType.Text, true,
+                CancellationToken.None);
+        }
+
+
+        private static async Task Unsubscribe(WebSocket socket, string symbol, long id, bool fasted)
+        {
+            var interval = fasted ? "@100ms" : "";
+
+            var packet = new SubscribePacket()
+            {
+                id = id,
+                method = "UNSUBSCRIBE",
+                @params = new[] {$"{symbol}@depth{interval}"}
+            };
+
+            var msg = JsonSerializer.Serialize(packet);
+
+            await socket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)), WebSocketMessageType.Text, true,
+                CancellationToken.None);
+        }
+
+        public async Task Reset(string symbol)
+        {
+            await Unsubscribe(symbol);
+            await Subscribe(symbol);
+        }
+
+        public async Task Subscribe(string symbol)
+        {
+            var webSocket = _engine.GetClientWebSocket();
+            if (webSocket is not {State: WebSocketState.Open})
+                return;
+
+            Console.WriteLine($"Subscribe to symbol {symbol}");
+
+            await Subscribe(webSocket, symbol, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), _fasted)
+                .ConfigureAwait(false);
+
+            await Task.Delay(2000);
+        }
+
+        public async Task Unsubscribe(string symbol)
+        {
+            var webSocket = _engine.GetClientWebSocket();
+            if (webSocket is not {State: WebSocketState.Open})
+                return;
+
+            Console.WriteLine($"Unsubscribe from symbol {symbol}");
+
+            await Unsubscribe(webSocket, symbol, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), _fasted)
+                .ConfigureAwait(false);
+
+            await Task.Delay(2000);
         }
 
         private async Task Receive(ClientWebSocket socket, string msg)
@@ -130,10 +181,10 @@ namespace MyJetWallet.Connector.Binance.Ws
                 {
                     return;
                 }
-                
+
 
                 if ((packet.Data.FirstUpdateId == book.LastId + 1 ||
-                    (packet.Data.FirstUpdateId <= book.LastId && book.LastId <= packet.Data.LastUpdateId))
+                     (packet.Data.FirstUpdateId <= book.LastId && book.LastId <= packet.Data.LastUpdateId))
                     && book.Asks.Count < 3000 && book.Bids.Count < 3000)
                 {
                     lock (_sync)
@@ -142,7 +193,7 @@ namespace MyJetWallet.Connector.Binance.Ws
                         {
                             var price = decimal.Parse(level[0]);
                             var volume = decimal.Parse(level[1]);
-                            
+
                             if (volume == 0)
                             {
                                 book.Asks.Remove(price);
@@ -177,7 +228,8 @@ namespace MyJetWallet.Connector.Binance.Ws
                 else
                 {
                     var symbol = packet.Stream.Replace("@depth", "").Replace("@100ms", "");
-                    _logger.LogInformation($"Resubscribe {symbol}. LastId={book.LastId}. Receive: {packet.Data.FirstUpdateId}|{packet.Data.LastUpdateId}. Count: {book.Asks.Count}|{book.Bids.Count}");
+                    _logger.LogInformation(
+                        $"Resubscribe {symbol}. LastId={book.LastId}. Receive: {packet.Data.FirstUpdateId}|{packet.Data.LastUpdateId}. Count: {book.Asks.Count}|{book.Bids.Count}");
                     book = await LoadSnapshot(symbol, packet.Stream);
                     lock (_sync)
                     {
@@ -230,7 +282,7 @@ namespace MyJetWallet.Connector.Binance.Ws
             BinanceOrderBookMonitoringLocator.SocketWssPingPongStatus.Inc();
             return Task.CompletedTask;
         }
-        
+
         private Task OnDisconnect()
         {
             BinanceOrderBookMonitoringLocator.SocketWssStatus.Dec();
@@ -280,7 +332,8 @@ namespace MyJetWallet.Connector.Binance.Ws
 
         private async Task<OrderBookSnapshotDto> GetSnapshot(string symbol)
         {
-            var json = await _httpClient.GetStringAsync($"https://api.binance.com/api/v3/depth?symbol={symbol.ToUpper()}&limit=1000");
+            var json = await _httpClient.GetStringAsync(
+                $"https://api.binance.com/api/v3/depth?symbol={symbol.ToUpper()}&limit=1000");
 
             var data = JsonSerializer.Deserialize<OrderBookSnapshotDto>(json);
 
@@ -300,6 +353,5 @@ namespace MyJetWallet.Connector.Binance.Ws
         public long LastId { get; set; }
         public Dictionary<decimal, decimal> Asks { get; set; } = new();
         public Dictionary<decimal, decimal> Bids { get; set; } = new();
-
     }
 }
