@@ -25,15 +25,14 @@ namespace TestApp
             var client = new BinanceWsOrderBooks(loggerFactory.CreateLogger<BinanceWsOrderBooks>(), new[] { "BCHBTC", "BCHUSDT", "BTCUSDT", "LTCBTC", "LTCUSDT", "XRPBTC", "ETHBTC", "ETHUSDT", "XRPUSDT", "TRXUSDT", "XLMUSDT" }, true);
 
 
-            client.BestPriceUpdateCallback = (time, symbol, bid, ask) =>
-                Console.WriteLine($"{symbol}  {time:HH:mm:ss}  {bid}  {ask}");
+            client.BestPriceUpdateEvent += PrintBestPrice;
 
             client.Start();
 
 
             var cmd =Console.ReadLine();
 
-            client.BestPriceUpdateCallback = null;
+            client.BestPriceUpdateEvent -= PrintBestPrice;
 
             while (cmd != "exit")
             {
@@ -58,6 +57,11 @@ namespace TestApp
 
             client.Stop();
             client.Dispose();
+        }
+
+        private static void PrintBestPrice(DateTime time, string symbol, decimal bid, decimal ask)
+        {
+            Console.WriteLine($"{symbol}  {time:HH:mm:ss}  {bid}  {ask}");
         }
 
         private static void Print(BinanceWsOrderBooks client, string symbol)

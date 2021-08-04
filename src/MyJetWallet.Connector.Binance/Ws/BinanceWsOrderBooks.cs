@@ -38,7 +38,8 @@ namespace MyJetWallet.Connector.Binance.Ws
             };
         }
 
-        public Action<DateTime, string, decimal, decimal> BestPriceUpdateCallback { get; set; }
+        //time, symbol, bid, ask
+        public event Action<DateTime, string, decimal, decimal> BestPriceUpdateEvent;
 
         private async Task Connect(ClientWebSocket socket)
         {
@@ -243,14 +244,25 @@ namespace MyJetWallet.Connector.Binance.Ws
 
         private void BestPriceUpdate(BinanceOrderBookCache book)
         {
-            var action = BestPriceUpdateCallback;
+            var action = BestPriceUpdateEvent;
             BinanceOrderBookMonitoringLocator.BinanceQuoteIncome.WithLabels(book.Symbol).Inc();
-            action?.Invoke(
-                book.Time,
-                book.Symbol,
-                book.Bids.Keys.Max(),
-                book.Asks.Keys.Min()
-            );
+
+            var bid = book.Bids.Keys.Max();
+            var ask = book.Asks.Keys.Min();
+
+            try
+            {
+                action?.Invoke(
+                    book.Time,
+                    book.Symbol,
+                    bid,
+                    ask
+                );
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Cannot execute BestPriceUpdateEvent. Symbol: {simbol}; bid: {bid}; ask: {ask}", book.Symbol, bid, ask);
+            }
         }
 
         private async Task<BinanceOrderBookCache> LoadSnapshot(string symbol, string stream)
