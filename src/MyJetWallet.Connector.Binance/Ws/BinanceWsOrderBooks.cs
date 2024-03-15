@@ -173,9 +173,20 @@ namespace MyJetWallet.Connector.Binance.Ws
 
                 if (book == null)
                 {
-                    var symbol = packet.Stream.Replace("@depth", "").Replace("@100ms", "");
-                    book = await LoadSnapshot(symbol, packet.Stream);
-                    BestPriceUpdate(book);
+                    if ((DateTime.UtcNow - _lastLoadFail).TotalMinutes > 2)
+                    {
+                        var symbol = packet.Stream.Replace("@depth", "").Replace("@100ms", "");
+                        try
+                        {
+                            book = await LoadSnapshot(symbol, packet.Stream);
+                            BestPriceUpdate(book);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "Cannot load snapshot for {symbol}. wait 2 min", symbol);
+                            _lastLoadFail = DateTime.UtcNow;
+                        }
+                    }
                 }
 
                 if (packet.Data.LastUpdateId <= book.LastId)
