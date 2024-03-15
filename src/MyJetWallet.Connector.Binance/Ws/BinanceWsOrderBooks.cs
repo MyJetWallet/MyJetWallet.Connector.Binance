@@ -77,7 +77,7 @@ namespace MyJetWallet.Connector.Binance.Ws
 
                 await Subscribe(socket, symbol, ++id, _fasted).ConfigureAwait(false);
 
-                await Task.Delay(2000);
+                await Task.Delay(20);
             }
         }
 
