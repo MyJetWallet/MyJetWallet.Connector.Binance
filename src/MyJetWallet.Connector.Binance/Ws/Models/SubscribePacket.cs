@@ -11,6 +11,22 @@ namespace MyJetWallet.Connector.Binance.Ws.Models
         public object[] @params { get; set; }
     }
 
+    public class OrderBookTopXDto
+    {
+        [JsonPropertyName("stream")] public string stream { get; set; }
+
+        [JsonPropertyName("data")] public DataType data { get; set; }
+
+        public class DataType
+        {
+            [JsonPropertyName("lastUpdateId")]
+            public long lastUpdateId { get; set; }
+            
+            public string[][] bids { get; set; }
+            public string[][] asks { get; set; }
+        }
+    }
+
     public class OrderBookDto
     {
         [JsonPropertyName("stream")]

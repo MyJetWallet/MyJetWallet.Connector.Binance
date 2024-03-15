@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Net.Http;
 using System.Net.WebSockets;
@@ -22,8 +23,9 @@ namespace MyJetWallet.Connector.Binance.Ws
         private readonly BinanceWebsocketEngine _engine;
         private readonly HttpClient _httpClient = new();
 
-        private readonly Dictionary<string, BinanceOrderBookCache> _cache = new();
         private readonly object _sync = new object();
+        
+        private readonly Dictionary<string, OrderBookTopXDto> _cache = new();
 
         public BinanceWsOrderBooks(ILogger logger, string[] symbols, bool fasted)
         {
@@ -87,7 +89,7 @@ namespace MyJetWallet.Connector.Binance.Ws
             {
                 id = id,
                 method = "SUBSCRIBE",
-                @params = new[] {$"{symbol}@depth{interval}"}
+                @params = new[] {$"{symbol}@depth20{interval}"}
             };
 
             var msg = JsonSerializer.Serialize(packet);
@@ -105,7 +107,7 @@ namespace MyJetWallet.Connector.Binance.Ws
             {
                 id = id,
                 method = "UNSUBSCRIBE",
-                @params = new[] {$"{symbol}@depth{interval}"}
+                @params = new[] {$"{symbol}@depth20{interval}"}
             };
 
             var msg = JsonSerializer.Serialize(packet);
@@ -153,167 +155,64 @@ namespace MyJetWallet.Connector.Binance.Ws
             BinanceOrderBookMonitoringLocator.SocketWssIncomeMessages.Inc();
             using (BinanceOrderBookMonitoringLocator.AvgWssQuoteProcessTime.NewTimer())
             {
-                var packet = JsonSerializer.Deserialize<OrderBookDto>(msg);
+                var packet = JsonSerializer.Deserialize<OrderBookTopXDto>(msg);
 
-                if (packet == null || string.IsNullOrEmpty(packet.Stream))
+                if (packet == null || string.IsNullOrEmpty(packet.stream))
                 {
                     Console.WriteLine(msg);
                     return;
                 }
-
-                BinanceOrderBookCache book;
-
-                lock (_sync)
+                
+                if (packet.data == null)
                 {
-                    if (!_cache.TryGetValue(packet.Stream, out book))
-                    {
-                        book = null;
-                    }
-                }
-
-                if (book == null)
-                {
-                    if ((DateTime.UtcNow - _lastLoadFail).TotalMinutes > 2)
-                    {
-                        var symbol = packet.Stream.Replace("@depth", "").Replace("@100ms", "");
-                        try
-                        {
-                            book = await LoadSnapshot(symbol, packet.Stream);
-                            BestPriceUpdate(book);
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogError(ex, "Cannot load snapshot for {symbol}. wait 2 min", symbol);
-                            _lastLoadFail = DateTime.UtcNow;
-                        }
-                    }
-                }
-
-                if (packet.Data.LastUpdateId <= book.LastId)
-                {
+                    Console.WriteLine(msg);
                     return;
                 }
+                
+                var action = BestPriceUpdateEvent;
 
+                var symbol = packet.stream.Replace("@depth20", "").Replace("@100ms", "");
 
-                if ((packet.Data.FirstUpdateId == book.LastId + 1 ||
-                     (packet.Data.FirstUpdateId <= book.LastId && book.LastId <= packet.Data.LastUpdateId))
-                    && book.Asks.Count < 3000 && book.Bids.Count < 3000)
+                var prices = packet.data
+                    .asks
+                    .Where(e => e.Length == 2 && e[1] != "0")
+                    .Select(e => decimal.Parse(e[0], NumberStyles.Any, CultureInfo.InvariantCulture))
+                    .ToList();
+                
+                var ask = prices.Any() ? prices.Min() : 0;
+                
+                prices = packet.data
+                    .bids
+                    .Where(e => e.Length == 2 && e[1] != "0")
+                    .Select(e => decimal.Parse(e[0], NumberStyles.Any, CultureInfo.InvariantCulture))
+                    .ToList();
+                
+                var bid = prices.Any() ? prices.Max() : 0;
+
+                if (!string.IsNullOrEmpty(symbol) && ask > 0 && bid > 0)
                 {
-                    lock (_sync)
+                    try
                     {
-                        foreach (var level in packet.Data.asks)
-                        {
-                            var price = decimal.Parse(level[0]);
-                            var volume = decimal.Parse(level[1]);
-
-                            if (volume == 0)
-                            {
-                                book.Asks.Remove(price);
-                            }
-                            else
-                            {
-                                book.Asks[price] = volume;
-                            }
-                        }
-
-                        foreach (var level in packet.Data.bids)
-                        {
-                            var price = decimal.Parse(level[0]);
-                            var volume = decimal.Parse(level[1]);
-
-                            if (volume == 0)
-                            {
-                                book.Bids.Remove(price);
-                            }
-                            else
-                            {
-                                book.Bids[price] = volume;
-                            }
-                        }
-
-                        book.LastId = packet.Data.LastUpdateId;
-                        book.Time = packet.Data.GetTime();
+                        action?.Invoke(
+                            DateTime.UtcNow,
+                            symbol,
+                            bid,
+                            ask
+                        );
                     }
-
-                    BestPriceUpdate(book);
-                }
-                else
-                {
-                    if ((DateTime.UtcNow - _lastLoadFail).TotalMinutes > 2)
+                    catch (Exception ex)
                     {
-                        var symbol = packet.Stream.Replace("@depth", "").Replace("@100ms", "");
-                        _logger.LogInformation(
-                            $"Resubscribe {symbol}. LastId={book.LastId}. Receive: {packet.Data.FirstUpdateId}|{packet.Data.LastUpdateId}. Count: {book.Asks.Count}|{book.Bids.Count}");
-
-                        try
-                        {
-                            book = await LoadSnapshot(symbol, packet.Stream);
-                            lock (_sync)
-                            {
-                                _cache[packet.Stream] = book;
-                            }
-
-                            BestPriceUpdate(book);
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogError(ex, "Cannot load snapshot for {symbol}. wait 2 min", symbol);
-                            _lastLoadFail = DateTime.UtcNow;
-                        }
-
-                        
+                        _logger.LogError(ex,
+                            "Cannot execute BestPriceUpdateEvent. Symbol: {simbol}; bid: {bid}; ask: {ask}", symbol,
+                            bid, ask);
                     }
                 }
+
+                if (!string.IsNullOrEmpty(symbol))
+                {
+                    _cache[symbol] = packet;
+                }
             }
-        }
-        private DateTime _lastLoadFail = DateTime.MinValue;
-
-        private void BestPriceUpdate(BinanceOrderBookCache book)
-        {
-            var action = BestPriceUpdateEvent;
-            BinanceOrderBookMonitoringLocator.BinanceQuoteIncome.WithLabels(book.Symbol).Inc();
-
-            var bid = book.Bids.Keys.Max();
-            var ask = book.Asks.Keys.Min();
-
-            try
-            {
-                action?.Invoke(
-                    book.Time,
-                    book.Symbol,
-                    bid,
-                    ask
-                );
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Cannot execute BestPriceUpdateEvent. Symbol: {simbol}; bid: {bid}; ask: {ask}", book.Symbol, bid, ask);
-            }
-        }
-        
-        
-        private async Task<BinanceOrderBookCache> LoadSnapshot(string symbol, string stream)
-        {
-            BinanceOrderBookCache book;
-            var snapshot = await GetSnapshot(symbol);
-
-            book = new BinanceOrderBookCache()
-            {
-                Symbol = symbol.ToUpper(),
-                Time = DateTime.UtcNow,
-                LastId = snapshot.LastUpdateId,
-                Asks = snapshot.asks.ToDictionary(e => decimal.Parse(e[0]), e => decimal.Parse(e[1])),
-                Bids = snapshot.bids.ToDictionary(e => decimal.Parse(e[0]), e => decimal.Parse(e[1]))
-            };
-
-            lock (_sync)
-            {
-                _cache[stream] = book;
-            }
-
-            Console.WriteLine($"Load snapshot: {symbol}. LastId: {book.LastId}. Time: {book.Time:O}");
-
-            return book;
         }
 
         private Task SendPing(ClientWebSocket arg)
@@ -346,42 +245,28 @@ namespace MyJetWallet.Connector.Binance.Ws
 
         public BinanceOrderBookCache GetOrderBook(string symbol)
         {
-            var interval = _fasted ? "@100ms" : "";
-            var key = $"{symbol.ToLower()}@depth{interval}";
-
             lock (_sync)
             {
-                if (!_cache.TryGetValue(key, out var book))
+                if (!_cache.TryGetValue(symbol.ToLower(), out var book))
                 {
                     return null;
                 }
 
                 var result = new BinanceOrderBookCache()
                 {
-                    Symbol = book.Symbol,
-                    Time = book.Time,
-                    LastId = book.LastId,
-                    Asks = book.Asks.ToDictionary(e => e.Key, e => e.Value),
-                    Bids = book.Bids.ToDictionary(e => e.Key, e => e.Value)
+                    Symbol = symbol.ToLower(),
+                    Time = DateTime.UtcNow,
+                    LastId = book.data.lastUpdateId,
+                    Asks = book.data.asks
+                        .Where(e => e.Length == 2 && e[1] != "0")
+                        .ToDictionary(e => decimal.Parse(e[0], NumberStyles.Any, CultureInfo.InvariantCulture), e => decimal.Parse(e[1], NumberStyles.Any, CultureInfo.InvariantCulture)),
+                    Bids = book.data.bids
+                        .Where(e => e.Length == 2 && e[1] != "0")
+                        .ToDictionary(e => decimal.Parse(e[0], NumberStyles.Any, CultureInfo.InvariantCulture), e => decimal.Parse(e[1], NumberStyles.Any, CultureInfo.InvariantCulture)),
                 };
 
                 return result;
             }
-        }
-
-        private async Task<OrderBookSnapshotDto> GetSnapshot(string symbol)
-        {
-            var json = await _httpClient.GetStringAsync(
-                $"https://api.binance.com/api/v3/depth?symbol={symbol.ToUpper()}&limit=1000");
-
-            var data = JsonSerializer.Deserialize<OrderBookSnapshotDto>(json);
-
-            if (data.LastUpdateId <= 0)
-            {
-                throw new Exception($"Cannot get order book shapshot {symbol}. Response: {json}");
-            }
-
-            return data;
         }
     }
 
