@@ -228,19 +228,34 @@ namespace MyJetWallet.Connector.Binance.Ws
                 }
                 else
                 {
-                    var symbol = packet.Stream.Replace("@depth", "").Replace("@100ms", "");
-                    _logger.LogInformation(
-                        $"Resubscribe {symbol}. LastId={book.LastId}. Receive: {packet.Data.FirstUpdateId}|{packet.Data.LastUpdateId}. Count: {book.Asks.Count}|{book.Bids.Count}");
-                    book = await LoadSnapshot(symbol, packet.Stream);
-                    lock (_sync)
+                    if ((DateTime.UtcNow - _lastLoadFail).TotalMinutes > 2)
                     {
-                        _cache[packet.Stream] = book;
-                    }
+                        var symbol = packet.Stream.Replace("@depth", "").Replace("@100ms", "");
+                        _logger.LogInformation(
+                            $"Resubscribe {symbol}. LastId={book.LastId}. Receive: {packet.Data.FirstUpdateId}|{packet.Data.LastUpdateId}. Count: {book.Asks.Count}|{book.Bids.Count}");
 
-                    BestPriceUpdate(book);
+                        try
+                        {
+                            book = await LoadSnapshot(symbol, packet.Stream);
+                            lock (_sync)
+                            {
+                                _cache[packet.Stream] = book;
+                            }
+
+                            BestPriceUpdate(book);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "Cannot load snapshot for {symbol}. wait 2 min", symbol);
+                            _lastLoadFail = DateTime.UtcNow;
+                        }
+
+                        
+                    }
                 }
             }
         }
+        private DateTime _lastLoadFail = DateTime.MinValue;
 
         private void BestPriceUpdate(BinanceOrderBookCache book)
         {
@@ -264,7 +279,8 @@ namespace MyJetWallet.Connector.Binance.Ws
                 _logger.LogError(ex, "Cannot execute BestPriceUpdateEvent. Symbol: {simbol}; bid: {bid}; ask: {ask}", book.Symbol, bid, ask);
             }
         }
-
+        
+        
         private async Task<BinanceOrderBookCache> LoadSnapshot(string symbol, string stream)
         {
             BinanceOrderBookCache book;
